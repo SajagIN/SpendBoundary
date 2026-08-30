@@ -28,7 +28,9 @@ export type AuditEventType =
   | "SESSION_CREATED"
   | "SESSION_VALIDATED"
   | "SESSION_SECURITY_ALERT"
-  | "SESSION_REVOKED";
+  | "SESSION_REVOKED"
+  | "GATEWAY_SECURITY_ALERT"
+  | "WEBHOOK_RECEIVED";
 
 export function computeEventHash(input: {
   previousHash: string;

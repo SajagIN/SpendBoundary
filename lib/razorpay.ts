@@ -1,4 +1,5 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { canonicalize } from "./ids";
 
 /**
  * Razorpay gateway adapter.
@@ -18,6 +19,101 @@ export class GatewayTimeoutError extends Error {
     super(message);
     this.name = "GatewayTimeoutError";
   }
+}
+
+export interface RazorpayResponse<T = any> {
+  data: T;
+  checksum?: string; // Include hash of response
+  timestamp: number;
+}
+
+/**
+ * S-10: Generates HMAC-SHA256 checksum over response data + timestamp.
+ */
+export function signRazorpayResponse(
+  data: unknown,
+  secret: string,
+  timestamp = Date.now(),
+): { checksum: string; timestamp: number } {
+  const payload = JSON.stringify(canonicalize(data)) + timestamp;
+  const checksum = createHmac("sha256", secret).update(payload).digest("hex");
+  return { checksum, timestamp };
+}
+
+/**
+ * S-10: Validates timestamp freshness (5 min window) and verifies
+ * timing-safe HMAC-SHA256 checksum on Razorpay responses.
+ */
+export function validateRazorpayResponse(
+  response: RazorpayResponse,
+  expectedSecret: string,
+  options?: {
+    maxAgeMs?: number;
+    requireChecksum?: boolean;
+  },
+): boolean {
+  const now = Date.now();
+  const maxAgeMs = options?.maxAgeMs ?? 5 * 60 * 1000; // 5 minute window
+
+  // Check timestamp presence and valid integer range
+  if (
+    typeof response?.timestamp !== "number" ||
+    !Number.isFinite(response.timestamp) ||
+    response.timestamp <= 0
+  ) {
+    console.error("❌ Invalid or missing timestamp on Razorpay response");
+    return false;
+  }
+
+  // 1. Check timestamp freshness (5 min window)
+  if (Math.abs(now - response.timestamp) > maxAgeMs) {
+    console.error("❌ Razorpay response timestamp freshness check failed");
+    return false;
+  }
+
+  // 2. Verify response checksum
+  if (response.checksum || options?.requireChecksum) {
+    if (!response.checksum || typeof response.checksum !== "string") {
+      console.error("❌ Missing required checksum on Razorpay response");
+      return false;
+    }
+
+    if (!expectedSecret) {
+      console.error("❌ Missing expectedSecret for Razorpay checksum verification");
+      return false;
+    }
+
+    const payload = JSON.stringify(canonicalize(response.data)) + response.timestamp;
+    const expectedChecksum = createHmac("sha256", expectedSecret)
+      .update(payload)
+      .digest("hex");
+
+    const checksumBuf = Buffer.from(response.checksum, "hex");
+    const expectedBuf = Buffer.from(expectedChecksum, "hex");
+
+    if (checksumBuf.length !== expectedBuf.length || !timingSafeEqual(checksumBuf, expectedBuf)) {
+      console.error("❌ Razorpay response checksum mismatch");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Verifies inbound Razorpay webhook signature (x-razorpay-signature) using constant-time comparison.
+ */
+export function verifyWebhookSignature(
+  rawBody: string,
+  signature: string,
+  secret: string,
+): boolean {
+  if (!signature || !secret || !rawBody) return false;
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  const sigBuf = Buffer.from(signature, "hex");
+  const expBuf = Buffer.from(expected, "hex");
+  if (sigBuf.length !== expBuf.length) return false;
+  return timingSafeEqual(sigBuf, expBuf);
 }
 
 export type GatewayOrder = {
