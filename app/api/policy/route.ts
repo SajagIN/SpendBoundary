@@ -1,48 +1,48 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { appendAuditEvent } from "@/lib/audit";
-import { getPolicyLimits } from "@/lib/mcp";
+import {
+  getOrCreateMandateSetupLink,
+  simulateMandateAuthorization,
+  revokeMandate,
+  toMandateView,
+  getMandateRecord,
+} from "@/lib/mandate";
+import { gatewayMode } from "@/lib/razorpay";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json(await getPolicyLimits());
+  const mandate = await getOrCreateMandateSetupLink();
+  return NextResponse.json({ mandate, gatewayMode: gatewayMode() });
 }
 
-const INT_FIELDS = [
-  "maxOrderPaise",
-  "dailyCapPaise",
-  "approvalThresholdPaise",
-  "velocityMaxRequests",
-  "velocityWindowSec",
-  "velocityLockoutSec",
-] as const;
-
-/** Live policy editing from the dashboard sliders. Integers only (R-01). */
-export async function PATCH(request: Request) {
+/**
+ * `authorize` stands in for the user completing the ₹1 hosted link.
+ * In live mode the identical transition happens through active reconciliation
+ * inside getOrCreateMandateSetupLink (Incident E09).
+ */
+export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
-  const data: Record<string, number | string> = {};
+  const action = String(body.action ?? "");
 
-  for (const field of INT_FIELDS) {
-    if (body[field] !== undefined) {
-      const value = Number(body[field]);
-      if (!Number.isInteger(value) || value < 0) {
-        return NextResponse.json(
-          { error: `${field} must be a non-negative integer` },
-          { status: 400 },
-        );
-      }
-      data[field] = value;
+  if (action === "authorize") {
+    try {
+      const record = await simulateMandateAuthorization();
+      return NextResponse.json({ ok: true, mandate: toMandateView(record) });
+    } catch (error) {
+      // Live keys are configured: the only legitimate path is a real payment.
+      return NextResponse.json(
+        { error: (error as Error).message, mandate: await getOrCreateMandateSetupLink() },
+        { status: 409 },
+      );
     }
   }
-  if (Array.isArray(body.allowedCategories)) {
-    data.allowedCategories = body.allowedCategories.map(String).join(",");
+  if (action === "revoke") {
+    const record = await revokeMandate();
+    return NextResponse.json({ ok: true, mandate: toMandateView(record) });
   }
-  if (Object.keys(data).length === 0) {
-    return NextResponse.json({ error: "No recognised policy fields supplied" }, { status: 400 });
+  if (action === "refresh") {
+    await getMandateRecord();
+    return NextResponse.json({ ok: true, mandate: await getOrCreateMandateSetupLink() });
   }
-
-  await prisma.policy.upsert({ where: { id: "default" }, update: data, create: { id: "default", ...data } });
-  await appendAuditEvent("POLICY_UPDATED", data);
-  return NextResponse.json(await getPolicyLimits());
+  return NextResponse.json({ error: "action must be authorize, revoke or refresh" }, { status: 400 });
 }

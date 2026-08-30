@@ -9,7 +9,12 @@ import {
   type PolicyEvaluation,
   type VerifiedItem,
 } from "./policy";
-import { GatewayTimeoutError, razorpayGateway, gatewayMode } from "./razorpay";
+import {
+  GatewayTimeoutError,
+  RecurringUnsupportedError,
+  razorpayGateway,
+  gatewayMode,
+} from "./razorpay";
 import { getOrCreateMandateSetupLink, getMandateRecord, toMandateView } from "./mandate";
 
 export const DEFAULT_AGENT_ID = "agent_demo_console";
@@ -31,10 +36,13 @@ export type CheckoutInput = {
 
 export type PaymentStatus =
   | "PAID"
+  | "SIMULATED_NOT_CHARGED"
   | "AWAITING_HUMAN_APPROVAL"
+  | "AWAITING_PAYMENT"
   | "BLOCKED"
   | "DEBIT_IN_PROGRESS"
   | "MANDATE_REQUIRED"
+  | "MANDATE_UNUSABLE"
   | "QUARANTINED_PENDING_RECONCILIATION"
   | "RETRY_DEDUPLICATED";
 
@@ -63,6 +71,13 @@ export type CheckoutResult = {
   };
   idempotencyKey: string;
   gatewayMode: string;
+  /**
+   * True when the "capture" came from the offline mock rather than Razorpay.
+   * Incident E08: this flag existed inside the adapter but was dropped before
+   * it reached the caller, so a simulated capture was indistinguishable from a
+   * real one. It is now part of the contract and drives the reported status.
+   */
+  simulated: boolean;
   agentGuidance: string;
 };
 
@@ -171,6 +186,12 @@ function guidanceFor(status: PaymentStatus, result: Partial<CheckoutResult>): st
   switch (status) {
     case "PAID":
       return `Payment captured with zero OTP. Tell the user the order is confirmed for ${result.amountFormatted}. Do NOT submit this cart again.`;
+    case "SIMULATED_NOT_CHARGED":
+      return `SIMULATED ONLY — no money moved and nothing will appear in the Razorpay dashboard. The gateway is running its offline mock because no Razorpay credentials are configured. Do NOT tell the user their order is paid.`;
+    case "AWAITING_PAYMENT":
+      return `No usable card mandate, so nothing was auto-debited. Give the user this payment link and stop: ${result.paymentLinkUrl}. Poll check_approval_status(requestId); do not retry the checkout.`;
+    case "MANDATE_UNUSABLE":
+      return "The stored card mandate cannot be charged. Nothing was debited. Report this to the user and stop; retrying will not help.";
     case "AWAITING_HUMAN_APPROVAL":
       return `Autonomous debit was halted. Give the user this payment link and stop: ${result.paymentLinkUrl}. Poll check_approval_status(requestId) instead of retrying checkout.`;
     case "BLOCKED":
@@ -247,6 +268,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
       },
       idempotencyKey: key,
       gatewayMode: gatewayMode(),
+      simulated: gatewayMode() === "DETERMINISTIC_MOCK",
       agentGuidance: guidanceFor(paymentStatus, base),
     };
   }
@@ -334,20 +356,61 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
   let paymentId: string | undefined;
   let debitedAt: Date | undefined;
   let requestStatus = "REJECTED";
+  let simulated = false;
   let reasonCode = evaluation.reasonCode as string;
   let reasonText = evaluation.reasonText;
 
   if (evaluation.decision === "ALLOW") {
     const mandate = await getMandateRecord();
     if (mandate.status !== "ACTIVE" || !mandate.tokenId) {
-      // F1 — no tokenized mandate yet: hand back the one-time ₹1 setup link.
-      const view = await getOrCreateMandateSetupLink();
-      paymentStatus = "MANDATE_REQUIRED";
-      paymentLinkUrl = view.setupLinkUrl ?? undefined;
-      requestStatus = "MANDATE_REQUIRED";
+      // F1 — no tokenized mandate, so nothing can be auto-debited. Rather than
+      // dead-ending the purchase, issue a real hosted payment link for the cart
+      // amount: that produces a genuine, dashboard-visible payment. The ₹1
+      // setup link still rides along on `mandate.setupLinkUrl` for whenever the
+      // account can actually tokenize a card.
+      await getOrCreateMandateSetupLink();
+      const link = await razorpayGateway.createPaymentLink({
+        amountPaise: evaluation.amountPaise,
+        description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
+        referenceId: requestId,
+      });
+      paymentLinkUrl = link.shortUrl;
+      simulated = link.simulated;
+      paymentStatus = "AWAITING_PAYMENT";
+      requestStatus = "AWAITING_APPROVAL";
       reasonCode = "MANDATE_REQUIRED";
       reasonText =
-        "Policy allows this purchase, but no tokenized card mandate is active. Complete the one-time ₹1 verification to enable zero-OTP autonomous debits.";
+        "Policy allows this purchase, but no tokenized card mandate is active, so no autonomous debit was attempted. A hosted payment link was issued for the full amount; completing it records a real payment.";
+      await prisma.approval.create({
+        data: {
+          requestId,
+          status: "PENDING",
+          amountPaise: evaluation.amountPaise,
+          paymentLinkId: link.linkId,
+          paymentLinkUrl: link.shortUrl,
+        },
+      });
+      await prisma.paymentAttempt.create({
+        data: {
+          requestId,
+          mode: "PAYMENT_LINK",
+          status: "CREATED",
+          amountPaise: evaluation.amountPaise,
+          paymentLinkUrl: link.shortUrl,
+          idempotencyKey: key,
+        },
+      });
+      await appendAuditEvent(
+        "APPROVAL_SUBMITTED",
+        {
+          kind: "MANDATE_ABSENT_PAYMENT_LINK_ISSUED",
+          paymentLinkId: link.linkId,
+          paymentLinkUrl: link.shortUrl,
+          amountPaise: evaluation.amountPaise,
+          simulated: link.simulated,
+        },
+        requestId,
+      );
     } else if (evaluation.amountPaise > mandate.maxDebitPaise) {
       paymentStatus = "BLOCKED";
       requestStatus = "REJECTED";
@@ -370,13 +433,20 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
         });
         paymentId = payment.paymentId;
         debitedAt = new Date();
-        paymentStatus = "PAID";
-        requestStatus = "PAID";
+        simulated = payment.simulated;
+        // A mock "capture" is never reported as PAID. Incident E08.
+        paymentStatus = payment.simulated ? "SIMULATED_NOT_CHARGED" : "PAID";
+        requestStatus = payment.simulated ? "SIMULATED" : "PAID";
+        if (payment.simulated) {
+          // reasonCode stays the POLICY verdict; execution truth rides on
+          // paymentStatus and `simulated`. Conflating the two hid E08.
+          reasonText = `${evaluation.reasonText} SIMULATED ONLY: the gateway is running its offline mock because no Razorpay credentials are configured. No money moved and nothing will appear in the Razorpay dashboard.`;
+        }
         await prisma.paymentAttempt.create({
           data: {
             requestId,
             mode: "MANDATE_AUTO_DEBIT",
-            status: "PAID",
+            status: payment.simulated ? "SIMULATED" : "PAID",
             amountPaise: evaluation.amountPaise,
             orderId,
             paymentId,
@@ -397,6 +467,55 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
           requestId,
         );
       } catch (error) {
+        if (error instanceof RecurringUnsupportedError) {
+          // Not ambiguous: no money moved and none will. Quarantining here
+          // would strand the request, so fall back to a real hosted payment
+          // link, which does produce a payment visible in the dashboard.
+          const link = await razorpayGateway.createPaymentLink({
+            amountPaise: evaluation.amountPaise,
+            description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
+            referenceId: requestId,
+          });
+          paymentLinkUrl = link.shortUrl;
+          simulated = link.simulated;
+          paymentStatus = "AWAITING_PAYMENT";
+          requestStatus = "AWAITING_APPROVAL";
+          reasonCode = "MANDATE_NOT_CHARGEABLE";
+          reasonText = `${error.message} A hosted payment link was issued instead; no autonomous debit was attempted.`;
+          await prisma.approval.create({
+            data: {
+              requestId,
+              status: "PENDING",
+              amountPaise: evaluation.amountPaise,
+              paymentLinkId: link.linkId,
+              paymentLinkUrl: link.shortUrl,
+            },
+          });
+          await prisma.paymentAttempt.create({
+            data: {
+              requestId,
+              mode: "PAYMENT_LINK",
+              status: "CREATED",
+              amountPaise: evaluation.amountPaise,
+              orderId,
+              paymentLinkUrl: link.shortUrl,
+              errorText: error.message,
+              idempotencyKey: key,
+            },
+          });
+          await appendAuditEvent(
+            "PAYMENT_ATTEMPT_RECORDED",
+            {
+              state: "MANDATE_NOT_CHARGEABLE",
+              orderId,
+              amountPaise: evaluation.amountPaise,
+              error: error.message,
+              fallbackPaymentLinkUrl: link.shortUrl,
+              quarantined: false,
+            },
+            requestId,
+          );
+        } else {
         // R-03 — ambiguous gateway status quarantines the request instead of
         // reporting a failure the agent would try to "fix" with a retry.
         const timedOut = error instanceof GatewayTimeoutError;
@@ -428,6 +547,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
           },
           requestId,
         );
+        }
       }
     }
   } else if (evaluation.decision === "REVIEW") {
@@ -437,6 +557,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
       referenceId: requestId,
     });
     paymentLinkUrl = link.shortUrl;
+    simulated = link.simulated;
     paymentStatus = "AWAITING_HUMAN_APPROVAL";
     requestStatus = "AWAITING_APPROVAL";
     await prisma.approval.create({
@@ -502,6 +623,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
     },
     idempotencyKey: key,
     gatewayMode: gatewayMode(),
+    simulated,
     agentGuidance: "",
   };
   result.agentGuidance = guidanceFor(paymentStatus, result);

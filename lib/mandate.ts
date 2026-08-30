@@ -65,12 +65,19 @@ export async function getOrCreateMandateSetupLink(): Promise<MandateView> {
     const link = await razorpayGateway.fetchPaymentLink(record.setupLinkId);
     if (link.status === "paid" && link.paymentId) {
       const payment = await razorpayGateway.fetchPayment(link.paymentId);
-      record = await activateMandate({
-        cardNetwork: payment.cardNetwork ?? "Card",
-        cardLast4: payment.cardLast4 ?? "0000",
-        tokenId: payment.tokenId ?? payment.paymentId,
-        customerId: payment.customerId ?? null,
-      });
+      // A captured ₹1 payment is NOT proof of a reusable mandate. If Razorpay
+      // returned no token_id (recurring not enabled, or the link was not an
+      // authorization transaction) then there is nothing to debit later.
+      // Falling back to the payment id here would mint an ACTIVE mandate that
+      // can never be charged — Incident E08 all over again.
+      if (payment.tokenId) {
+        record = await activateMandate({
+          cardNetwork: payment.cardNetwork ?? "Card",
+          cardLast4: payment.cardLast4 ?? "0000",
+          tokenId: payment.tokenId,
+          customerId: payment.customerId ?? null,
+        });
+      }
       return toMandateView(record);
     }
   }
@@ -130,10 +137,20 @@ export async function activateMandate(input: {
 }
 
 /**
- * Demo-mode shortcut standing in for the user completing the ₹1 link.
- * In live mode the same state transition happens through reconciliation.
+ * Offline-demo shortcut standing in for the user completing the ₹1 link.
+ *
+ * Refused whenever real Razorpay credentials are configured. Fabricating a
+ * mandate against a live account produced Incident E08: the dashboard showed
+ * an ACTIVE card, checkouts reported success, and no money ever moved. With
+ * live keys the mandate may only become ACTIVE by reconciling a genuinely
+ * captured ₹1 payment.
  */
 export async function simulateMandateAuthorization() {
+  if (isLiveMode()) {
+    throw new Error(
+      "Refusing to fabricate a card mandate while live Razorpay keys are configured. Pay the ₹1 setup link, then use the refresh action to reconcile the real token.",
+    );
+  }
   const record = await getMandateRecord();
   const linkId = record.setupLinkId ?? `plink_demo_${Date.now()}`;
   const payment = razorpayGateway.mockCapture(linkId);

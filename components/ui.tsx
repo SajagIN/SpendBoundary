@@ -46,6 +46,10 @@ export function DecisionBadge({ decision, small }: { decision: string; small?: b
 export function StatusPill({ status }: { status: string }) {
   const map: Record<string, string> = {
     PAID: "ALLOW",
+    SIMULATED_NOT_CHARGED: "DENY",
+    SIMULATED: "DENY",
+    AWAITING_PAYMENT: "REVIEW",
+    MANDATE_UNUSABLE: "DENY",
     AWAITING_HUMAN_APPROVAL: "REVIEW",
     AWAITING_APPROVAL: "REVIEW",
     PENDING: "REVIEW",

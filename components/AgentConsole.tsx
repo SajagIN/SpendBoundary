@@ -36,6 +36,7 @@ type CheckoutResult = {
   };
   idempotencyKey: string;
   gatewayMode: string;
+  simulated: boolean;
   agentGuidance: string;
 };
 
@@ -309,6 +310,19 @@ export default function AgentConsole({
                 <div className="metric mt-1">{latest.telemetry.latencyMs} ms</div>
               </div>
             </div>
+
+            {latest.simulated && (
+              <div
+                className="mt-3 rounded-lg px-3 py-2 text-sm"
+                style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.45)" }}
+              >
+                <strong className="text-rose-300">SIMULATED — no money moved. </strong>
+                <span className="text-slate-200">
+                  The gateway is running its offline mock, so this will not appear in the Razorpay
+                  dashboard. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET for real transactions.
+                </span>
+              </div>
+            )}
 
             <p className="mt-3 text-sm text-slate-200">{latest.reasonText}</p>
             <p className="mt-2 rounded-lg px-3 py-2 text-xs text-slate-300"

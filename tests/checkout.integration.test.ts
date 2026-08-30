@@ -48,12 +48,16 @@ describe("end-to-end policy-gated checkout", () => {
     });
 
     expect(result.decision).toBe("ALLOW");
-    expect(result.paymentStatus).toBe("PAID");
     expect(result.amountPaise).toBe(35_000);
     expect(result.orderId).toMatch(/^order_/);
     expect(result.paymentId).toMatch(/^pay_/);
     expect(result.telemetry.debitedAt).toBeTruthy();
-    expect(await getDailySpentPaise()).toBe(35_000);
+    // Incident E08: the offline mock must never masquerade as a real capture.
+    expect(result.simulated).toBe(true);
+    expect(result.paymentStatus).toBe("SIMULATED_NOT_CHARGED");
+    expect(result.agentGuidance).toMatch(/SIMULATED ONLY/);
+    // A simulated capture must not consume the real spend budget either.
+    expect(await getDailySpentPaise()).toBe(0);
   });
 
   it("discards a hallucinated price and charges the database price", async () => {
@@ -65,6 +69,30 @@ describe("end-to-end policy-gated checkout", () => {
 
     expect(result.amountPaise).toBe(150_000);
     expect(result.decision).toBe("REVIEW");
+  });
+
+  it("never reports a simulated capture as PAID (Incident E08)", async () => {
+    const result = await requestCheckout({
+      agentId: nextAgent(),
+      reason: "Notebook",
+      items: [{ sku: "SKU-NOTE-350", quantity: 1 }],
+    });
+
+    expect(result.gatewayMode).toBe("DETERMINISTIC_MOCK");
+    expect(result.simulated).toBe(true);
+    expect(result.paymentStatus).not.toBe("PAID");
+    expect(result.reasonText).toMatch(/No money moved/i);
+  });
+
+  it("refuses to fabricate a mandate when live keys are configured", async () => {
+    process.env.RAZORPAY_KEY_ID = "rzp_test_dummy";
+    process.env.RAZORPAY_KEY_SECRET = "dummy_secret";
+    try {
+      await expect(simulateMandateAuthorization()).rejects.toThrow(/Refusing to fabricate/);
+    } finally {
+      delete process.env.RAZORPAY_KEY_ID;
+      delete process.env.RAZORPAY_KEY_SECRET;
+    }
   });
 
   it("AC-02: halts a ₹1,500 lamp and issues a hosted payment link", async () => {
@@ -170,10 +198,9 @@ describe("end-to-end policy-gated checkout", () => {
     const first = await requestCheckout({ agentId, reason: "two notebooks", items: cart });
     const second = await requestCheckout({ agentId, reason: "two notebooks", items: cart });
 
-    expect(first.paymentStatus).toBe("PAID");
+    expect(first.paymentStatus).toBe("SIMULATED_NOT_CHARGED");
     expect(second.paymentStatus).toBe("RETRY_DEDUPLICATED");
     expect(second.requestId).toBe(first.requestId);
-    expect(await getDailySpentPaise()).toBe(70_000);
   });
 
   it("requires the ₹1 mandate before any autonomous debit", async () => {
@@ -185,8 +212,12 @@ describe("end-to-end policy-gated checkout", () => {
     });
 
     expect(result.decision).toBe("ALLOW");
-    expect(result.paymentStatus).toBe("MANDATE_REQUIRED");
+    // No chargeable mandate: nothing is auto-debited and a real payment link
+    // for the full cart amount is issued instead.
+    expect(result.paymentStatus).toBe("AWAITING_PAYMENT");
+    expect(result.reasonCode).toBe("MANDATE_REQUIRED");
     expect(result.paymentLinkUrl).toMatch(/^https:\/\/rzp\.io\//);
+    expect(result.paymentId).toBeUndefined();
     expect(await getDailySpentPaise()).toBe(0);
   });
 
