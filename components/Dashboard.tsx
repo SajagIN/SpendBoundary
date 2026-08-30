@@ -54,15 +54,10 @@ const TABS = [
 type TabKey = (typeof TABS)[number]["key"];
 
 export default function Dashboard({ projectPath }: { projectPath: string }) {
-  const [mounted, setMounted] = useState(false);
   const [tab, setTab] = useState<TabKey>("console");
   const [data, setData] = useState<DashboardData | null>(null);
   const [products, setProducts] = useState<CatalogueProduct[]>([]);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   const refresh = useCallback(async () => {
     const [dashboardResponse, catalogueResponse] = await Promise.all([
@@ -75,10 +70,8 @@ export default function Dashboard({ projectPath }: { projectPath: string }) {
   }, []);
 
   useEffect(() => {
-    if (mounted) {
-      void refresh();
-    }
-  }, [mounted, refresh]);
+    void refresh();
+  }, [refresh]);
 
   async function mandateAction(action: "authorize" | "revoke") {
     setBusy(true);
@@ -108,9 +101,9 @@ export default function Dashboard({ projectPath }: { projectPath: string }) {
     }
   }
 
-  if (!mounted || !data) {
+  if (!data) {
     return (
-      <main className="mx-auto max-w-7xl px-5 py-10" suppressHydrationWarning>
+      <main className="mx-auto max-w-7xl px-5 py-10">
         <p className="text-sm text-slate-400">Loading the control room…</p>
       </main>
     );
@@ -119,7 +112,7 @@ export default function Dashboard({ projectPath }: { projectPath: string }) {
   const mandateActive = data.mandate.status === "ACTIVE";
 
   return (
-    <main className="mx-auto max-w-7xl px-5 py-6" suppressHydrationWarning>
+    <main className="mx-auto max-w-7xl px-5 py-6">
       <header className="glass mb-4 px-5 py-4">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
