@@ -9,18 +9,8 @@ import {
   type PolicyEvaluation,
   type VerifiedItem,
 } from "./policy";
-import {
-  GatewayTimeoutError,
-  RecurringUnsupportedError,
-  razorpayGateway,
-  gatewayMode,
-} from "./razorpay";
+import { GatewayTimeoutError, razorpayGateway, gatewayMode } from "./razorpay";
 import { getOrCreateMandateSetupLink, getMandateRecord, toMandateView } from "./mandate";
-import {
-  type RequestContext,
-  getSessionBinding,
-  validateSessionContext,
-} from "./session";
 
 export const DEFAULT_AGENT_ID = "agent_demo_console";
 
@@ -37,15 +27,11 @@ export type CheckoutInput = {
   items: CheckoutItemInput[];
   /** Test hook for AC-05: forces an ambiguous gateway status on debit. */
   simulateTimeout?: boolean;
-  /** S-09: Authenticated session context */
-  sessionContext?: RequestContext;
-  sessionId?: string;
 };
 
 export type PaymentStatus =
   | "PAID"
   | "AWAITING_HUMAN_APPROVAL"
-  | "AWAITING_PAYMENT"
   | "BLOCKED"
   | "DEBIT_IN_PROGRESS"
   | "MANDATE_REQUIRED"
@@ -55,8 +41,6 @@ export type PaymentStatus =
 export type CheckoutResult = {
   requestId: string;
   agentId: string;
-  sessionId?: string;
-  sessionHash?: string;
   decision: "ALLOW" | "REVIEW" | "DENY";
   reasonCode: string;
   reasonText: string;
@@ -187,8 +171,6 @@ function guidanceFor(status: PaymentStatus, result: Partial<CheckoutResult>): st
   switch (status) {
     case "PAID":
       return `Payment captured with zero OTP. Tell the user the order is confirmed for ${result.amountFormatted}. Do NOT submit this cart again.`;
-    case "AWAITING_PAYMENT":
-      return `Autonomous debit unavailable. Give the user this payment link to complete the purchase: ${result.paymentLinkUrl}. Poll check_approval_status(requestId) instead of retrying checkout.`;
     case "AWAITING_HUMAN_APPROVAL":
       return `Autonomous debit was halted. Give the user this payment link and stop: ${result.paymentLinkUrl}. Poll check_approval_status(requestId) instead of retrying checkout.`;
     case "BLOCKED":
@@ -282,176 +264,25 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
     policy.velocityLockoutSec,
   );
 
-  // S-09 — Session Binding & Context Validation
-  const sessionId = input.sessionId?.trim() || input.sessionContext?.sessionId?.trim();
-  let sessionHash: string | undefined;
-
-  if (sessionId) {
-    const session = await getSessionBinding(sessionId);
-    if (!session) {
-      const requestId = newRequestId();
-      const createData: Record<string, unknown> = {
-        id: requestId,
-        agentId,
-        reason: input.reason?.slice(0, 500) ?? "",
-        cartJson: JSON.stringify(input.items ?? []),
-        itemsJson: JSON.stringify(cart.verified),
-        subtotalPaise: cart.subtotalPaise,
-        idempotencyKey: key,
-        status: "REJECTED",
-        requestedAt,
-        evaluatedAt: new Date(),
-        epochTimestamp: BigInt(epochTimestamp),
-        latencyMs: Date.now() - epochTimestamp,
-      };
-      if (sessionId) createData.sessionId = sessionId;
-
-      await (prisma.agentRequest.create as any)({
-        data: createData,
-      });
-      await appendAuditEvent(
-        "SESSION_SECURITY_ALERT",
-        {
-          sessionId,
-          agentId,
-          reasonCode: "SESSION_NOT_FOUND",
-          reasonText: `Session '${sessionId}' was not found in the gateway directory.`,
-        },
-        requestId,
-      );
-      return {
-        requestId,
-        agentId,
-        sessionId,
-        decision: "DENY",
-        reasonCode: "SESSION_NOT_FOUND",
-        reasonText: `Session '${sessionId}' was not found in the gateway directory.`,
-        paymentStatus: "BLOCKED",
-        amountPaise: cart.subtotalPaise,
-        amountFormatted: formatPaise(cart.subtotalPaise),
-        items: cart.verified,
-        rejectedItems: cart.rejectedItems,
-        rules: [
-          {
-            id: "S-09",
-            label: "Session Binding & Context Security",
-            passed: false,
-            detail: `Session '${sessionId}' was not found in database.`,
-          },
-        ],
-        mandate: toMandateView(await getMandateRecord()),
-        telemetry: {
-          requestedAt: requestedAt.toISOString(),
-          evaluatedAt: new Date().toISOString(),
-          latencyMs: Date.now() - epochTimestamp,
-          epochTimestamp,
-        },
-        idempotencyKey: key,
-        gatewayMode: gatewayMode(),
-        agentGuidance: "Session invalid or missing. Re-authenticate to establish a valid session binding.",
-      };
-    }
-
-    if (input.sessionContext) {
-      const validation = await validateSessionContext(input.sessionContext, session, cart.subtotalPaise);
-      if (!validation.valid) {
-        const requestId = newRequestId();
-        const createData: Record<string, unknown> = {
-          id: requestId,
-          agentId,
-          reason: input.reason?.slice(0, 500) ?? "",
-          cartJson: JSON.stringify(input.items ?? []),
-          itemsJson: JSON.stringify(cart.verified),
-          subtotalPaise: cart.subtotalPaise,
-          idempotencyKey: key,
-          status: "REJECTED",
-          requestedAt,
-          evaluatedAt: new Date(),
-          epochTimestamp: BigInt(epochTimestamp),
-          latencyMs: Date.now() - epochTimestamp,
-        };
-        if (sessionId) createData.sessionId = sessionId;
-
-        await (prisma.agentRequest.create as any)({
-          data: createData,
-        });
-        await appendAuditEvent(
-          "SESSION_SECURITY_ALERT",
-          {
-            sessionId,
-            agentId,
-            reasonCode: validation.reasonCode,
-            reasonText: validation.reasonText,
-            receivedContext: input.sessionContext,
-          },
-          requestId,
-        );
-        return {
-          requestId,
-          agentId,
-          sessionId,
-          decision: "DENY",
-          reasonCode: validation.reasonCode ?? "SESSION_USER_AGENT_MISMATCH",
-          reasonText: validation.reasonText ?? "Session context validation failed.",
-          paymentStatus: "BLOCKED",
-          amountPaise: cart.subtotalPaise,
-          amountFormatted: formatPaise(cart.subtotalPaise),
-          items: cart.verified,
-          rejectedItems: cart.rejectedItems,
-          rules: [
-            {
-              id: "S-09",
-              label: "Session Binding & Context Security",
-              passed: false,
-              detail: validation.reasonText ?? "Session context validation failed.",
-            },
-          ],
-          mandate: toMandateView(await getMandateRecord()),
-          telemetry: {
-            requestedAt: requestedAt.toISOString(),
-            evaluatedAt: new Date().toISOString(),
-            latencyMs: Date.now() - epochTimestamp,
-            epochTimestamp,
-          },
-          idempotencyKey: key,
-          gatewayMode: gatewayMode(),
-          agentGuidance: "Session context verification failed. Transaction blocked to prevent session hijacking.",
-        };
-      }
-      sessionHash = validation.sessionHash;
-      await appendAuditEvent("SESSION_VALIDATED", {
-        sessionId,
-        agentId,
-        sessionHash,
-      });
-    }
-  }
-
   const requestId = newRequestId();
-  const requestData: Record<string, unknown> = {
-    id: requestId,
-    agentId,
-    reason: input.reason?.slice(0, 500) ?? "",
-    cartJson: JSON.stringify(input.items ?? []),
-    itemsJson: JSON.stringify(cart.verified),
-    subtotalPaise: cart.subtotalPaise,
-    idempotencyKey: key,
-    status: "EVALUATING",
-    requestedAt,
-    epochTimestamp: BigInt(epochTimestamp),
-  };
-  if (sessionId) requestData.sessionId = sessionId;
-  if (sessionHash) requestData.sessionHash = sessionHash;
-
-  await (prisma.agentRequest.create as any)({
-    data: requestData,
+  await prisma.agentRequest.create({
+    data: {
+      id: requestId,
+      agentId,
+      reason: input.reason?.slice(0, 500) ?? "",
+      cartJson: JSON.stringify(input.items ?? []),
+      itemsJson: JSON.stringify(cart.verified),
+      subtotalPaise: cart.subtotalPaise,
+      idempotencyKey: key,
+      status: "EVALUATING",
+      requestedAt,
+      epochTimestamp: BigInt(epochTimestamp),
+    },
   });
   await appendAuditEvent(
     "AGENT_REQUEST",
     {
       agentId,
-      ...(sessionId ? { sessionId } : {}),
-      ...(sessionHash ? { sessionHash } : {}),
       reason: input.reason,
       claimedCart: input.items ?? [],
       serverVerifiedItems: cart.verified,
@@ -566,86 +397,37 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
           requestId,
         );
       } catch (error) {
-        if (error instanceof RecurringUnsupportedError) {
-          // Not ambiguous: no money moved and none will. Quarantining here
-          // would strand the request, so fall back to a real hosted payment
-          // link, which does produce a payment visible in the dashboard.
-          const link = await razorpayGateway.createPaymentLink({
+        // R-03 — ambiguous gateway status quarantines the request instead of
+        // reporting a failure the agent would try to "fix" with a retry.
+        const timedOut = error instanceof GatewayTimeoutError;
+        paymentStatus = "DEBIT_IN_PROGRESS";
+        requestStatus = "DEBIT_IN_PROGRESS";
+        reasonCode = "QUARANTINED_PENDING_RECONCILIATION";
+        reasonText = timedOut
+          ? "The gateway did not confirm this debit before timing out. The request is quarantined; duplicate debits for this cart are blocked until reconciliation completes."
+          : `Gateway error during debit: ${(error as Error).message}. Request quarantined.`;
+        await prisma.paymentAttempt.create({
+          data: {
+            requestId,
+            mode: "MANDATE_AUTO_DEBIT",
+            status: "DEBIT_IN_PROGRESS",
             amountPaise: evaluation.amountPaise,
-            description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
-            referenceId: requestId,
-          });
-          paymentLinkUrl = link.shortUrl;
-          paymentStatus = "AWAITING_PAYMENT";
-          requestStatus = "AWAITING_APPROVAL";
-          reasonCode = "MANDATE_NOT_CHARGEABLE";
-          reasonText = `${error.message} A hosted payment link was issued instead; no autonomous debit was attempted.`;
-          await prisma.approval.create({
-            data: {
-              requestId,
-              status: "PENDING",
-              amountPaise: evaluation.amountPaise,
-              paymentLinkId: link.linkId,
-              paymentLinkUrl: link.shortUrl,
-            },
-          });
-          await prisma.paymentAttempt.create({
-            data: {
-              requestId,
-              mode: "PAYMENT_LINK",
-              status: "CREATED",
-              amountPaise: evaluation.amountPaise,
-              orderId,
-              paymentLinkUrl: link.shortUrl,
-              errorText: error.message,
-              idempotencyKey: key,
-            },
-          });
-          await appendAuditEvent(
-            "PAYMENT_ATTEMPT_RECORDED",
-            {
-              state: "MANDATE_NOT_CHARGEABLE",
-              orderId,
-              amountPaise: evaluation.amountPaise,
-              error: error.message,
-              fallbackPaymentLinkUrl: link.shortUrl,
-              quarantined: false,
-            },
-            requestId,
-          );
-        } else {
-          // R-03 — ambiguous gateway status quarantines the request instead of
-          // reporting a failure the agent would try to "fix" with a retry.
-          const timedOut = error instanceof GatewayTimeoutError;
-          paymentStatus = "DEBIT_IN_PROGRESS";
-          requestStatus = "DEBIT_IN_PROGRESS";
-          reasonCode = "QUARANTINED_PENDING_RECONCILIATION";
-          reasonText = timedOut
-            ? "The gateway did not confirm this debit before timing out. The request is quarantined; duplicate debits for this cart are blocked until reconciliation completes."
-            : `Gateway error during debit: ${(error as Error).message}. Request quarantined.`;
-          await prisma.paymentAttempt.create({
-            data: {
-              requestId,
-              mode: "MANDATE_AUTO_DEBIT",
-              status: "DEBIT_IN_PROGRESS",
-              amountPaise: evaluation.amountPaise,
-              orderId,
-              errorText: (error as Error).message,
-              idempotencyKey: key,
-            },
-          });
-          await appendAuditEvent(
-            "PAYMENT_ATTEMPT_RECORDED",
-            {
-              state: "DEBIT_IN_PROGRESS",
-              orderId,
-              amountPaise: evaluation.amountPaise,
-              error: (error as Error).message,
-              quarantined: true,
-            },
-            requestId,
-          );
-        }
+            orderId,
+            errorText: (error as Error).message,
+            idempotencyKey: key,
+          },
+        });
+        await appendAuditEvent(
+          "PAYMENT_ATTEMPT_RECORDED",
+          {
+            state: "DEBIT_IN_PROGRESS",
+            orderId,
+            amountPaise: evaluation.amountPaise,
+            error: (error as Error).message,
+            quarantined: true,
+          },
+          requestId,
+        );
       }
     }
   } else if (evaluation.decision === "REVIEW") {
@@ -698,8 +480,6 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
   const result: CheckoutResult = {
     requestId,
     agentId,
-    sessionId: sessionId ?? undefined,
-    sessionHash: sessionHash ?? undefined,
     decision: evaluation.decision,
     reasonCode,
     reasonText,

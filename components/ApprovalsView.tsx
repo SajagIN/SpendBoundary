@@ -155,7 +155,7 @@ export default function ApprovalsView({ onMutated }: { onMutated: () => void }) 
                     <StatusPill status={approval.status} />
                   </td>
                   <td className="text-slate-400">{approval.decidedBy ?? "—"}</td>
-                  <td className="text-xs text-slate-400" suppressHydrationWarning>
+                  <td className="text-xs text-slate-400">
                     {approval.decidedAt ? new Date(approval.decidedAt).toLocaleString() : "—"}
                   </td>
                 </tr>

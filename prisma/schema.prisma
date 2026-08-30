@@ -47,8 +47,6 @@ model Policy {
 model AgentRequest {
   id             String    @id
   agentId        String
-  sessionId      String?
-  sessionHash    String?
   reason         String
   cartJson       String // untrusted agent cart; server re-prices from Product
   itemsJson      String // server-verified line items
@@ -64,10 +62,8 @@ model AgentRequest {
   decision PolicyDecision?
   approval Approval?
   attempts PaymentAttempt[]
-  session  SessionBinding?  @relation(fields: [sessionId], references: [sessionId], onDelete: SetNull)
 
   @@index([agentId, requestedAt])
-  @@index([sessionId])
   @@index([status])
 }
 
@@ -135,27 +131,6 @@ model PaymentMandate {
   setupLinkUrl  String?
   activatedAt   DateTime?
   updatedAt     DateTime  @updatedAt
-}
-
-/// S-09: Cryptographic session binding and transaction security layer.
-model SessionBinding {
-  id                 String   @id @default(cuid())
-  sessionId          String   @unique
-  agentId            String
-  ipAddress          String
-  country            String?
-  userAgent          String
-  deviceFingerprint  String
-  createdAt          DateTime @default(now())
-  expiresAt          DateTime
-  maxTransactionValue Int     @default(200000) // paise (₹2,000)
-  maxDailySpend      Int      @default(500000) // paise (₹5,000)
-  revokedAt          DateTime?
-
-  requests           AgentRequest[]
-
-  @@index([agentId, expiresAt])
-  @@index([sessionId])
 }
 
 /// Append-only SHA-256 Merkle audit chain (R-06).

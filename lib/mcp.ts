@@ -76,41 +76,12 @@ export const TOOLS = [
         },
         reason: { type: "string", description: "Why the user wants this purchase." },
         agentId: { type: "string", description: "Stable id for the calling agent." },
-        sessionId: { type: "string", description: "S-09: Authenticated session ID bound to this transaction." },
-        deviceFingerprint: { type: "string", description: "S-09: Client device fingerprint hash." },
         simulateTimeout: {
           type: "boolean",
           description: "Test hook: force an ambiguous gateway status to exercise the quarantine.",
         },
       },
       required: ["items", "reason"],
-    },
-  },
-  {
-    name: "create_session",
-    description:
-      "S-09: Create a cryptographically bound 8-hour agent session with IP, User-Agent, and device fingerprint context hashing.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentId: { type: "string", description: "Agent ID to bind the session to." },
-        ipAddress: { type: "string", description: "Client IP address." },
-        country: { type: "string", description: "Optional 2-letter ISO country code." },
-        userAgent: { type: "string", description: "Client User-Agent string." },
-        deviceFingerprint: { type: "string", description: "Device fingerprint hash." },
-        maxTransactionValue: { type: "integer", description: "Max paise allowed per single transaction." },
-        maxDailySpend: { type: "integer", description: "Max daily spend paise." },
-      },
-      required: ["agentId"],
-    },
-  },
-  {
-    name: "get_session_status",
-    description: "S-09: Check whether a session binding is active, expired, or revoked.",
-    inputSchema: {
-      type: "object",
-      properties: { sessionId: { type: "string" } },
-      required: ["sessionId"],
     },
   },
   {
@@ -144,35 +115,11 @@ export async function callTool(name: string, args: Record<string, unknown> = {})
       return getProduct(String(args.sku ?? ""));
     case "get_policy_limits":
       return getPolicyLimits();
-    case "create_session": {
-      const { createSessionBinding } = await import("./session");
-      const agentId = String(args.agentId || "agent_demo_console");
-      const ipAddress = String(args.ipAddress || "127.0.0.1");
-      const userAgent = String(args.userAgent || "SpendBoundary-Agent/1.0");
-      const deviceFingerprint = String(args.deviceFingerprint || "fp_default");
-      return createSessionBinding({
-        agentId,
-        ipAddress,
-        country: args.country ? String(args.country) : null,
-        userAgent,
-        deviceFingerprint,
-        maxTransactionValue: args.maxTransactionValue ? Number(args.maxTransactionValue) : undefined,
-        maxDailySpend: args.maxDailySpend ? Number(args.maxDailySpend) : undefined,
-      });
-    }
-    case "get_session_status": {
-      const { getSessionBinding } = await import("./session");
-      const session = await getSessionBinding(String(args.sessionId ?? ""));
-      if (!session) return { found: false, message: "Session not found" };
-      const active = session.expiresAt.getTime() > Date.now() && !session.revokedAt;
-      return { found: true, session, active };
-    }
     case "request_checkout":
       return requestCheckout({
         items: (args.items as { sku: string; quantity: number }[]) ?? [],
         reason: String(args.reason ?? ""),
         agentId: args.agentId ? String(args.agentId) : undefined,
-        sessionId: args.sessionId ? String(args.sessionId) : undefined,
         simulateTimeout: Boolean(args.simulateTimeout),
       });
     case "check_approval_status":

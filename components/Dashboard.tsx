@@ -58,15 +58,31 @@ export default function Dashboard({ projectPath }: { projectPath: string }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [products, setProducts] = useState<CatalogueProduct[]>([]);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [dashboardResponse, catalogueResponse] = await Promise.all([
-      fetch("/api/dashboard", { cache: "no-store" }),
-      fetch("/api/catalogue", { cache: "no-store" }),
-    ]);
-    setData((await dashboardResponse.json()) as DashboardData);
-    const catalogue = (await catalogueResponse.json()) as { products: CatalogueProduct[] };
-    setProducts(catalogue.products);
+    try {
+      setError(null);
+      const [dashboardResponse, catalogueResponse] = await Promise.all([
+        fetch("/api/dashboard", { cache: "no-store" }),
+        fetch("/api/catalogue", { cache: "no-store" }),
+      ]);
+
+      if (!dashboardResponse.ok || !catalogueResponse.ok) {
+        throw new Error(
+          `Server returned error: Dashboard (${dashboardResponse.status}), Catalogue (${catalogueResponse.status})`,
+        );
+      }
+
+      const dashData = (await dashboardResponse.json()) as DashboardData;
+      const catalogue = (await catalogueResponse.json()) as { products: CatalogueProduct[] };
+
+      setData(dashData);
+      setProducts(catalogue.products ?? []);
+    } catch (err) {
+      console.error("Dashboard refresh error:", err);
+      setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+    }
   }, []);
 
   useEffect(() => {
@@ -99,6 +115,20 @@ export default function Dashboard({ projectPath }: { projectPath: string }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (error) {
+    return (
+      <main className="mx-auto max-w-7xl px-5 py-10">
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-5 text-red-300">
+          <h2 className="text-lg font-bold">Failed to load dashboard</h2>
+          <p className="mt-1 text-sm">{error}</p>
+          <button className="btn mt-4 bg-red-600 hover:bg-red-500" onClick={() => void refresh()}>
+            Retry
+          </button>
+        </div>
+      </main>
+    );
   }
 
   if (!data) {
