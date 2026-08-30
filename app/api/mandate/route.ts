@@ -25,8 +25,15 @@ export async function POST(request: Request) {
   const action = String(body.action ?? "");
 
   if (action === "authorize") {
-    const record = await simulateMandateAuthorization();
-    return NextResponse.json({ ok: true, mandate: toMandateView(record) });
+    try {
+      const record = await simulateMandateAuthorization();
+      return NextResponse.json({ ok: true, mandate: toMandateView(record) });
+    } catch (error) {
+      return NextResponse.json(
+        { error: (error as Error).message, mandate: await getOrCreateMandateSetupLink() },
+        { status: 409 },
+      );
+    }
   }
   if (action === "revoke") {
     const record = await revokeMandate();

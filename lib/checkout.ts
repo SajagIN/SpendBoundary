@@ -647,19 +647,23 @@ export async function checkApprovalStatus(requestId: string) {
   let reconciled = false;
 
   if (request.approval && request.approval.status === "PENDING" && request.approval.paymentLinkId) {
-    const link = await razorpayGateway.fetchPaymentLink(request.approval.paymentLinkId);
-    if (link.status === "paid") {
-      await markApprovalPaid(requestId, link.paymentId);
-      status = "PAID";
-      reconciled = true;
-    } else if (link.status === "cancelled" || link.status === "expired") {
-      await prisma.approval.update({
-        where: { requestId },
-        data: { status: "EXPIRED", decidedAt: new Date() },
-      });
-      await prisma.agentRequest.update({ where: { id: requestId }, data: { status: "EXPIRED" } });
-      status = "EXPIRED";
-      reconciled = true;
+    try {
+      const link = await razorpayGateway.fetchPaymentLink(request.approval.paymentLinkId);
+      if (link.status === "paid") {
+        await markApprovalPaid(requestId, link.paymentId);
+        status = "PAID";
+        reconciled = true;
+      } else if (link.status === "cancelled" || link.status === "expired") {
+        await prisma.approval.update({
+          where: { requestId },
+          data: { status: "EXPIRED", decidedAt: new Date() },
+        });
+        await prisma.agentRequest.update({ where: { id: requestId }, data: { status: "EXPIRED" } });
+        status = "EXPIRED";
+        reconciled = true;
+      }
+    } catch (err) {
+      console.warn(`Failed to reconcile payment link ${request.approval.paymentLinkId}:`, err);
     }
   }
 

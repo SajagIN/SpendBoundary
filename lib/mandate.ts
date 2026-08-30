@@ -62,48 +62,67 @@ export async function getOrCreateMandateSetupLink(): Promise<MandateView> {
 
   // Active reconciliation: has the user already paid the ₹1 link?
   if (record.setupLinkId && isLiveMode()) {
-    const link = await razorpayGateway.fetchPaymentLink(record.setupLinkId);
-    if (link.status === "paid" && link.paymentId) {
-      const payment = await razorpayGateway.fetchPayment(link.paymentId);
-      // A captured ₹1 payment is NOT proof of a reusable mandate. If Razorpay
-      // returned no token_id (recurring not enabled, or the link was not an
-      // authorization transaction) then there is nothing to debit later.
-      // Falling back to the payment id here would mint an ACTIVE mandate that
-      // can never be charged — Incident E08 all over again.
-      if (payment.tokenId) {
-        record = await activateMandate({
-          cardNetwork: payment.cardNetwork ?? "Card",
-          cardLast4: payment.cardLast4 ?? "0000",
-          tokenId: payment.tokenId,
-          customerId: payment.customerId ?? null,
-        });
+    try {
+      const link = await razorpayGateway.fetchPaymentLink(record.setupLinkId);
+      if (link.status === "paid" && link.paymentId) {
+        const payment = await razorpayGateway.fetchPayment(link.paymentId);
+        // A captured ₹1 payment is NOT proof of a reusable mandate. If Razorpay
+        // returned no token_id (recurring not enabled, or the link was not an
+        // authorization transaction) then there is nothing to debit later.
+        // Falling back to the payment id here would mint an ACTIVE mandate that
+        // can never be charged — Incident E08 all over again.
+        if (payment.tokenId) {
+          record = await activateMandate({
+            cardNetwork: payment.cardNetwork ?? "Card",
+            cardLast4: payment.cardLast4 ?? "0000",
+            tokenId: payment.tokenId,
+            customerId: payment.customerId ?? null,
+          });
+        }
+        return toMandateView(record);
       }
-      return toMandateView(record);
+    } catch (error) {
+      console.warn("Failed to reconcile existing mandate setup link from gateway:", error);
+      // The setup link ID in DB might be from mock mode, expired, or on another account.
+      // Reset the invalid setupLinkId so a fresh link can be generated.
+      record = await prisma.paymentMandate.update({
+        where: { id: "default" },
+        data: {
+          setupLinkId: null,
+          setupLinkUrl: null,
+          status: "PENDING_AUTHORIZATION",
+        },
+      });
     }
   }
 
   if (!record.setupLinkId) {
-    const link = await razorpayGateway.createPaymentLink({
-      amountPaise: MANDATE_SETUP_PAISE,
-      description: "SpendBoundary — one-time ₹1 mandate verification",
-      referenceId: `mandate_setup_${Date.now()}`,
-      saveCard: true,
-    });
-    record = await prisma.paymentMandate.update({
-      where: { id: "default" },
-      data: {
-        status: "PENDING_AUTHORIZATION",
-        setupLinkId: link.linkId,
-        setupLinkUrl: link.shortUrl,
-      },
-    });
-    await appendAuditEvent("APPROVAL_SUBMITTED", {
-      kind: "MANDATE_SETUP_LINK_CREATED",
-      linkId: link.linkId,
-      shortUrl: link.shortUrl,
-      amountPaise: MANDATE_SETUP_PAISE,
-      simulated: link.simulated,
-    });
+    try {
+      const link = await razorpayGateway.createPaymentLink({
+        amountPaise: MANDATE_SETUP_PAISE,
+        description: "SpendBoundary — one-time ₹1 mandate verification",
+        referenceId: `mandate_setup_${Date.now()}`,
+        saveCard: true,
+      });
+      record = await prisma.paymentMandate.update({
+        where: { id: "default" },
+        data: {
+          status: "PENDING_AUTHORIZATION",
+          setupLinkId: link.linkId,
+          setupLinkUrl: link.shortUrl,
+        },
+      });
+      await appendAuditEvent("APPROVAL_SUBMITTED", {
+        kind: "MANDATE_SETUP_LINK_CREATED",
+        linkId: link.linkId,
+        shortUrl: link.shortUrl,
+        amountPaise: MANDATE_SETUP_PAISE,
+        simulated: link.simulated,
+      });
+    } catch (error) {
+      console.error("Failed to create mandate setup link from gateway:", error);
+      return toMandateView(record);
+    }
   }
 
   return toMandateView(record);
