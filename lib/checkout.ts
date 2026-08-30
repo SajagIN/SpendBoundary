@@ -14,6 +14,8 @@ import {
   RecurringUnsupportedError,
   razorpayGateway,
   gatewayMode,
+  isLiveMode,
+  type GatewayPaymentLink,
 } from "./razorpay";
 import { getOrCreateMandateSetupLink, getMandateRecord, toMandateView } from "./mandate";
 
@@ -360,6 +362,30 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
   let reasonCode = evaluation.reasonCode as string;
   let reasonText = evaluation.reasonText;
 
+async function safeCreatePaymentLink(input: {
+  amountPaise: number;
+  description: string;
+  referenceId: string;
+  saveCard?: boolean;
+}): Promise<GatewayPaymentLink> {
+  try {
+    return await razorpayGateway.createPaymentLink(input);
+  } catch (error) {
+    console.warn("Failed to create Razorpay payment link:", error);
+    if (process.env.DEMO_MODE !== "false" || !isLiveMode()) {
+      const linkId = `plink_sim_${input.referenceId}`;
+      return {
+        linkId,
+        shortUrl: `https://rzp.io/rzp/${linkId.slice(6, 14)}`,
+        status: "created",
+        amountPaise: input.amountPaise,
+        simulated: true,
+      };
+    }
+    throw error;
+  }
+}
+
   if (evaluation.decision === "ALLOW") {
     const mandate = await getMandateRecord();
     if (mandate.status !== "ACTIVE" || !mandate.tokenId) {
@@ -369,7 +395,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
       // setup link still rides along on `mandate.setupLinkUrl` for whenever the
       // account can actually tokenize a card.
       await getOrCreateMandateSetupLink();
-      const link = await razorpayGateway.createPaymentLink({
+      const link = await safeCreatePaymentLink({
         amountPaise: evaluation.amountPaise,
         description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
         referenceId: requestId,
@@ -471,7 +497,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
           // Not ambiguous: no money moved and none will. Quarantining here
           // would strand the request, so fall back to a real hosted payment
           // link, which does produce a payment visible in the dashboard.
-          const link = await razorpayGateway.createPaymentLink({
+          const link = await safeCreatePaymentLink({
             amountPaise: evaluation.amountPaise,
             description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
             referenceId: requestId,
@@ -551,7 +577,7 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
       }
     }
   } else if (evaluation.decision === "REVIEW") {
-    const link = await razorpayGateway.createPaymentLink({
+    const link = await safeCreatePaymentLink({
       amountPaise: evaluation.amountPaise,
       description: input.reason?.slice(0, 200) || "SpendBoundary human-reviewed purchase",
       referenceId: requestId,

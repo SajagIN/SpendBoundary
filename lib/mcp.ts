@@ -48,13 +48,13 @@ export const TOOLS = [
   {
     name: "get_policy_limits",
     description:
-      "Fetch the merchant spend policy, the remaining 24h budget, and the tokenized card mandate status. If no card is stored, this returns a one-time ₹1 setup link to give the user.",
+      "Fetch the merchant spend policy, remaining 24h budget, and tokenized card mandate status. The agent NEVER asks the user for credit card numbers or session credentials; payments are handled server-side via pre-authorized mandate or hosted payment links.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "request_checkout",
     description:
-      "Submit a cart for deterministic policy evaluation and execution. The server re-prices every line from its own database, so any price you supply is ignored. Returns ALLOW (charged with zero OTP), REVIEW (hosted payment link for the human) or DENY (blocked). Never call this twice for the same cart — use check_approval_status instead.",
+      "Submit a cart for deterministic policy evaluation and execution. The agent NEVER asks for credit card details, CVV, or authentication sessions. The server re-prices every line from its own database and executes zero-OTP autonomous debits (ALLOW) under the policy limit, or provides a hosted payment link (REVIEW / AWAITING_PAYMENT) for the user to authorize.",
     inputSchema: {
       type: "object",
       properties: {

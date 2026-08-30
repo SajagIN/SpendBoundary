@@ -58,7 +58,7 @@
       "get": {
         "operationId": "getPolicyLimits",
         "summary": "Fetch spend limits, remaining budget and card mandate status",
-        "description": "Call this before checking out. If the mandate is not ACTIVE, the response carries a one-time ₹1 setup link to hand to the user.",
+        "description": "Call this before checking out. The AI agent never requires or asks for credit card details, passwords, or device sessions. If the mandate is not ACTIVE, the response carries a one-time ₹1 setup link to hand to the user.",
         "responses": {
           "200": {
             "description": "Current policy, remaining 24h budget and mandate state",
@@ -71,7 +71,7 @@
       "post": {
         "operationId": "requestCheckout",
         "summary": "Submit a cart for policy evaluation and execution",
-        "description": "The server re-prices every line from its own database, so any price supplied here is recorded for audit but never trusted. Never call twice for the same cart — poll getRequestStatus instead.",
+        "description": "The AI agent NEVER asks the user for credit card numbers or session credentials. The server re-prices every line from its own database and executes zero-OTP autonomous debits (ALLOW) or provides a hosted payment link (REVIEW / AWAITING_PAYMENT). Never call twice for the same cart — poll getRequestStatus instead.",
         "requestBody": {
           "required": true,
           "content": {

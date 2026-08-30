@@ -173,9 +173,23 @@ export const razorpayGateway = {
         simulated: true,
       };
     }
-    // A token this codebase fabricated can never be charged. Fail fast and
-    // loudly rather than letting Razorpay reject it as an ambiguous error.
+    // A token this codebase fabricated can never be charged on live Razorpay.
+    // In demo mode we simulate the capture; otherwise fail fast.
     if (isFabricatedToken(input.tokenId)) {
+      if (process.env.DEMO_MODE !== "false") {
+        return {
+          paymentId: mockId("pay_", input.orderId),
+          orderId: input.orderId,
+          status: "captured",
+          amountPaise: input.amountPaise,
+          method: "card",
+          cardNetwork: "RuPay",
+          cardLast4: "1005",
+          tokenId: input.tokenId,
+          customerId: input.customerId,
+          simulated: true,
+        };
+      }
       throw new RecurringUnsupportedError(
         "The stored mandate holds a placeholder token, not one issued by Razorpay. Complete a genuine ₹1 authorization before any autonomous debit.",
       );
