@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design.md §2 — the Financial Control Room palette. */
+:root {
+  --canvas: #0b1220;
+  --surface: #111c2e;
+  --card: rgba(255, 255, 255, 0.04);
+  --border: rgba(255, 255, 255, 0.08);
+  --allow: #10b981;
+  --review: #f59e0b;
+  --deny: #ef4444;
+  --mcp: #6366f1;
+  --accent: #3b82f6;
+  --text: #f8fafc;
+  --muted: #94a3b8;
+}
+
+html,
+body {
+  background: var(--canvas);
+  color: var(--text);
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background-image:
+    radial-gradient(900px 500px at 12% -10%, rgba(59, 130, 246, 0.12), transparent 60%),
+    radial-gradient(800px 480px at 92% 0%, rgba(99, 102, 241, 0.1), transparent 55%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  .glass {
+    @apply rounded-xl border;
+    background: var(--card);
+    border-color: var(--border);
+    backdrop-filter: blur(10px);
+  }
+
+  .panel {
+    @apply glass p-5;
+  }
+
+  .label {
+    @apply text-xs uppercase tracking-wider;
+    color: var(--muted);
+  }
+
+  .metric {
+    @apply text-xl font-mono font-bold;
+  }
+
+  .hash {
+    @apply font-mono text-xs break-all;
+    color: var(--muted);
+  }
+
+  .btn {
+    @apply rounded-lg px-3 py-2 text-sm font-medium transition-colors border;
+    border-color: var(--border);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+  }
+
+  .btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  .btn:disabled {
+    @apply opacity-40 cursor-not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #ffffff;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: #2f6fe0;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium;
+    border-color: var(--border);
+  }
+
+  .input {
+    @apply w-full rounded-lg border px-3 py-2 text-sm outline-none;
+    background: rgba(255, 255, 255, 0.03);
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  .input:focus {
+    border-color: var(--accent);
+  }
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid #0b1220;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}

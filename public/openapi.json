@@ -1,0 +1,187 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SpendBoundary — Policy-Gated Agentic Commerce Gateway",
+    "description": "Merchant-side financial firewall for autonomous AI agents. Every cart is re-priced server-side in integer paise and evaluated against a deterministic 3-zone policy: ALLOW (autonomous zero-OTP debit), REVIEW (hosted payment link, human authorizes) or DENY (blocked at the gateway).",
+    "version": "2.1.0"
+  },
+  "servers": [{ "url": "http://localhost:3000", "description": "Local SpendBoundary gateway" }],
+  "paths": {
+    "/api/catalogue": {
+      "get": {
+        "operationId": "searchCatalogue",
+        "summary": "Search the merchant catalogue",
+        "description": "Returns live stock and the authoritative integer paise price for each SKU. These are the only prices the gateway will honour.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Free text search over name, description, category and SKU."
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching products",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "products": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Product" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/policy": {
+      "get": {
+        "operationId": "getPolicyLimits",
+        "summary": "Fetch spend limits, remaining budget and card mandate status",
+        "description": "Call this before checking out. If the mandate is not ACTIVE, the response carries a one-time ₹1 setup link to hand to the user.",
+        "responses": {
+          "200": {
+            "description": "Current policy, remaining 24h budget and mandate state",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/checkout": {
+      "post": {
+        "operationId": "requestCheckout",
+        "summary": "Submit a cart for policy evaluation and execution",
+        "description": "The server re-prices every line from its own database, so any price supplied here is recorded for audit but never trusted. Never call twice for the same cart — poll getRequestStatus instead.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["items", "reason"],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["sku", "quantity"],
+                      "properties": {
+                        "sku": { "type": "string" },
+                        "quantity": { "type": "integer", "minimum": 1 },
+                        "claimedPricePaise": { "type": "integer" }
+                      }
+                    }
+                  },
+                  "reason": { "type": "string" },
+                  "agentId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Policy decision and payment outcome",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/CheckoutResult" } }
+            }
+          },
+          "400": { "description": "Malformed cart" }
+        }
+      }
+    },
+    "/api/requests/{id}": {
+      "get": {
+        "operationId": "getRequestStatus",
+        "summary": "Poll a submitted request and reconcile its payment",
+        "description": "Reconciles hosted payment links against the gateway and reports whether a quarantined debit has resolved. Call this instead of retrying a checkout.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current request state",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "404": { "description": "No such request" }
+        }
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "operationId": "getAuditLedger",
+        "summary": "Read the SHA-256 Merkle audit chain and its verification result",
+        "responses": {
+          "200": {
+            "description": "Sealed events plus chain verification",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Product": {
+        "type": "object",
+        "properties": {
+          "sku": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "category": { "type": "string" },
+          "pricePaise": { "type": "integer" },
+          "priceFormatted": { "type": "string" },
+          "stock": { "type": "integer" },
+          "categoryWhitelisted": { "type": "boolean" }
+        }
+      },
+      "CheckoutResult": {
+        "type": "object",
+        "properties": {
+          "requestId": { "type": "string" },
+          "decision": { "type": "string", "enum": ["ALLOW", "REVIEW", "DENY"] },
+          "reasonCode": { "type": "string" },
+          "reasonText": { "type": "string" },
+          "paymentStatus": {
+            "type": "string",
+            "enum": [
+              "PAID",
+              "AWAITING_HUMAN_APPROVAL",
+              "BLOCKED",
+              "DEBIT_IN_PROGRESS",
+              "MANDATE_REQUIRED",
+              "QUARANTINED_PENDING_RECONCILIATION",
+              "RETRY_DEDUPLICATED"
+            ]
+          },
+          "amountPaise": { "type": "integer" },
+          "amountFormatted": { "type": "string" },
+          "paymentLinkUrl": { "type": "string" },
+          "orderId": { "type": "string" },
+          "paymentId": { "type": "string" },
+          "agentGuidance": { "type": "string" }
+        }
+      }
+    }
+  }
+}

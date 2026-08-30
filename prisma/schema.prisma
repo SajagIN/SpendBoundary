@@ -1,0 +1,148 @@
+// SpendBoundary — Policy-Gated Agentic Commerce Gateway
+//
+// Local development uses SQLite (DATABASE_URL="file:./dev.db").
+// For Supabase PostgreSQL, switch `provider` to "postgresql", uncomment
+// `directUrl`, and point DATABASE_URL at the IPv4 transaction pooler
+// (port 6543, ?pgbouncer=true) — see uploads/Errors_encountered.md E04/E05.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+  // directUrl = env("DIRECT_URL")
+}
+
+/// Merchant catalogue. Prices are stored as non-negative integer paise (R-01).
+model Product {
+  id          String   @id @default(cuid())
+  sku         String   @unique
+  name        String
+  description String
+  category    String
+  pricePaise  Int
+  stock       Int      @default(100)
+  imageEmoji  String   @default("📦")
+  createdAt   DateTime @default(now())
+
+  @@index([category])
+}
+
+/// Singleton merchant policy. All limits are integer paise / integer counts.
+model Policy {
+  id                     String   @id @default("default")
+  maxOrderPaise          Int      @default(200000) // ₹2,000 single-order cap
+  dailyCapPaise          Int      @default(500000) // ₹5,000 rolling 24h cap
+  approvalThresholdPaise Int      @default(100000) // ₹1,000 human-review threshold
+  allowedCategories      String   @default("Office Supplies,Electronics,Home Office,Furniture")
+  velocityMaxRequests    Int      @default(3)
+  velocityWindowSec      Int      @default(60)
+  velocityLockoutSec     Int      @default(900) // 15 minute circuit breaker
+  updatedAt              DateTime @updatedAt
+}
+
+/// One inbound checkout intent from an autonomous agent.
+model AgentRequest {
+  id             String    @id
+  agentId        String
+  reason         String
+  cartJson       String // untrusted agent cart; server re-prices from Product
+  itemsJson      String // server-verified line items
+  subtotalPaise  Int
+  idempotencyKey String    @unique
+  status         String    @default("EVALUATING")
+  requestedAt    DateTime  @default(now())
+  evaluatedAt    DateTime?
+  debitedAt      DateTime?
+  latencyMs      Int?
+  epochTimestamp BigInt
+
+  decision PolicyDecision?
+  approval Approval?
+  attempts PaymentAttempt[]
+
+  @@index([agentId, requestedAt])
+  @@index([status])
+}
+
+/// Deterministic policy engine verdict for a request.
+model PolicyDecision {
+  id          String   @id @default(cuid())
+  requestId   String   @unique
+  decision    String // ALLOW | REVIEW | DENY
+  reasonCode  String
+  reasonText  String
+  rulesJson   String // full rule-by-rule evaluation trace
+  amountPaise Int
+  evaluatedAt DateTime @default(now())
+
+  request AgentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+/// Human-in-the-loop review record for Zone 2 transactions.
+model Approval {
+  id             String    @id @default(cuid())
+  requestId      String    @unique
+  status         String    @default("PENDING") // PENDING | APPROVED | REJECTED | EXPIRED
+  amountPaise    Int
+  paymentLinkId  String?
+  paymentLinkUrl String?
+  decidedBy      String?
+  createdAt      DateTime  @default(now())
+  decidedAt      DateTime?
+
+  request AgentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+}
+
+/// Every gateway interaction, including quarantined ambiguous debits.
+model PaymentAttempt {
+  id             String   @id @default(cuid())
+  requestId      String
+  provider       String   @default("razorpay")
+  mode           String // MANDATE_AUTO_DEBIT | PAYMENT_LINK | MANDATE_SETUP
+  status         String // PAID | DEBIT_IN_PROGRESS | FAILED | CREATED
+  amountPaise    Int
+  orderId        String?
+  paymentId      String?
+  paymentLinkUrl String?
+  errorText      String?
+  idempotencyKey String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  request AgentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@index([status])
+}
+
+/// Tokenized card mandate captured via the one-time ₹1 consent flow (R-05).
+model PaymentMandate {
+  id            String    @id @default("default")
+  status        String    @default("NO_CARD_STORED") // NO_CARD_STORED | PENDING_AUTHORIZATION | ACTIVE | REVOKED
+  cardNetwork   String?
+  cardLast4     String?
+  tokenId       String?
+  customerId    String?
+  maxDebitPaise Int       @default(100000)
+  setupLinkId   String?
+  setupLinkUrl  String?
+  activatedAt   DateTime?
+  updatedAt     DateTime  @updatedAt
+}
+
+/// Append-only SHA-256 Merkle audit chain (R-06).
+model AuditEvent {
+  id           String  @id @default(cuid())
+  index        Int     @unique
+  eventType    String
+  requestId    String?
+  payloadJson  String
+  previousHash String
+  eventHash    String
+  createdAt    String // ISO string; hashed verbatim so verification is byte-exact
+
+  @@index([eventType])
+}
