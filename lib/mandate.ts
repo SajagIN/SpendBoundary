@@ -65,12 +65,14 @@ export async function getOrCreateMandateSetupLink(): Promise<MandateView> {
     const link = await razorpayGateway.fetchPaymentLink(record.setupLinkId);
     if (link.status === "paid" && link.paymentId) {
       const payment = await razorpayGateway.fetchPayment(link.paymentId);
-      record = await activateMandate({
-        cardNetwork: payment.cardNetwork ?? "Card",
-        cardLast4: payment.cardLast4 ?? "0000",
-        tokenId: payment.tokenId ?? payment.paymentId,
-        customerId: payment.customerId ?? null,
-      });
+      if (payment.tokenId) {
+        record = await activateMandate({
+          cardNetwork: payment.cardNetwork ?? "Card",
+          cardLast4: payment.cardLast4 ?? "0000",
+          tokenId: payment.tokenId,
+          customerId: payment.customerId ?? null,
+        });
+      }
       return toMandateView(record);
     }
   }

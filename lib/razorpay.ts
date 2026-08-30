@@ -21,6 +21,26 @@ export class GatewayTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when the account cannot execute a tokenized zero-OTP debit — either
+ * recurring payments are not enabled on it or the stored token was never minted
+ * by a genuine authorization transaction.
+ *
+ * This is NOT an ambiguous gateway status: no money moved and none will. It
+ * must never be quarantined as though a debit might still land.
+ */
+export class RecurringUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecurringUnsupportedError";
+  }
+}
+
+/** True for tokens this codebase fabricated rather than received from Razorpay. */
+export function isFabricatedToken(tokenId: string | null | undefined): boolean {
+  return Boolean(tokenId && /^token_[0-9a-f]{14}$/.test(tokenId));
+}
+
 export interface RazorpayResponse<T = any> {
   data: T;
   checksum?: string; // Include hash of response
@@ -248,23 +268,51 @@ export const razorpayGateway = {
         simulated: true,
       };
     }
-    const payment = await razorpayFetch<{
+    if (isFabricatedToken(input.tokenId)) {
+      throw new RecurringUnsupportedError(
+        "The stored mandate holds a placeholder token, not one issued by Razorpay. Complete a genuine ₹1 authorization before any autonomous debit.",
+      );
+    }
+    if (input.tokenId && input.tokenId.startsWith("pay_")) {
+      throw new RecurringUnsupportedError(
+        "The stored mandate holds a payment ID (pay_...) instead of a recurring card token (token_...). Razorpay requires recurring tokenization to auto-debit cards without OTP.",
+      );
+    }
+
+    let payment: {
       razorpay_payment_id?: string;
       id?: string;
       status?: string;
       amount?: number;
       method?: string;
-    }>("/payments/create/recurring", {
-      method: "POST",
-      body: JSON.stringify({
-        order_id: input.orderId,
-        token: input.tokenId,
-        customer_id: input.customerId,
-        amount: input.amountPaise,
-        currency: "INR",
-        recurring: "1",
-      }),
-    });
+    };
+    try {
+      payment = await razorpayFetch<{
+        razorpay_payment_id?: string;
+        id?: string;
+        status?: string;
+        amount?: number;
+        method?: string;
+      }>("/payments/create/recurring", {
+        method: "POST",
+        body: JSON.stringify({
+          order_id: input.orderId,
+          token: input.tokenId,
+          customer_id: input.customerId,
+          amount: input.amountPaise,
+          currency: "INR",
+          recurring: "1",
+        }),
+      });
+    } catch (error) {
+      const message = (error as Error).message ?? "";
+      if (/not found on the server|not enabled|not supported|invalid token|token/i.test(message)) {
+        throw new RecurringUnsupportedError(
+          `Recurring payments are not enabled on this Razorpay account or the token is not a recurring token (gateway said: ${message.trim()})`,
+        );
+      }
+      throw error;
+    }
     return {
       paymentId: payment.razorpay_payment_id ?? payment.id ?? "",
       orderId: input.orderId,

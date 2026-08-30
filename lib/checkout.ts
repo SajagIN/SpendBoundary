@@ -9,7 +9,12 @@ import {
   type PolicyEvaluation,
   type VerifiedItem,
 } from "./policy";
-import { GatewayTimeoutError, razorpayGateway, gatewayMode } from "./razorpay";
+import {
+  GatewayTimeoutError,
+  RecurringUnsupportedError,
+  razorpayGateway,
+  gatewayMode,
+} from "./razorpay";
 import { getOrCreateMandateSetupLink, getMandateRecord, toMandateView } from "./mandate";
 import {
   type RequestContext,
@@ -40,6 +45,7 @@ export type CheckoutInput = {
 export type PaymentStatus =
   | "PAID"
   | "AWAITING_HUMAN_APPROVAL"
+  | "AWAITING_PAYMENT"
   | "BLOCKED"
   | "DEBIT_IN_PROGRESS"
   | "MANDATE_REQUIRED"
@@ -181,6 +187,8 @@ function guidanceFor(status: PaymentStatus, result: Partial<CheckoutResult>): st
   switch (status) {
     case "PAID":
       return `Payment captured with zero OTP. Tell the user the order is confirmed for ${result.amountFormatted}. Do NOT submit this cart again.`;
+    case "AWAITING_PAYMENT":
+      return `Autonomous debit unavailable. Give the user this payment link to complete the purchase: ${result.paymentLinkUrl}. Poll check_approval_status(requestId) instead of retrying checkout.`;
     case "AWAITING_HUMAN_APPROVAL":
       return `Autonomous debit was halted. Give the user this payment link and stop: ${result.paymentLinkUrl}. Poll check_approval_status(requestId) instead of retrying checkout.`;
     case "BLOCKED":
@@ -558,37 +566,86 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
           requestId,
         );
       } catch (error) {
-        // R-03 — ambiguous gateway status quarantines the request instead of
-        // reporting a failure the agent would try to "fix" with a retry.
-        const timedOut = error instanceof GatewayTimeoutError;
-        paymentStatus = "DEBIT_IN_PROGRESS";
-        requestStatus = "DEBIT_IN_PROGRESS";
-        reasonCode = "QUARANTINED_PENDING_RECONCILIATION";
-        reasonText = timedOut
-          ? "The gateway did not confirm this debit before timing out. The request is quarantined; duplicate debits for this cart are blocked until reconciliation completes."
-          : `Gateway error during debit: ${(error as Error).message}. Request quarantined.`;
-        await prisma.paymentAttempt.create({
-          data: {
+        if (error instanceof RecurringUnsupportedError) {
+          // Not ambiguous: no money moved and none will. Quarantining here
+          // would strand the request, so fall back to a real hosted payment
+          // link, which does produce a payment visible in the dashboard.
+          const link = await razorpayGateway.createPaymentLink({
+            amountPaise: evaluation.amountPaise,
+            description: input.reason?.slice(0, 200) || "SpendBoundary purchase",
+            referenceId: requestId,
+          });
+          paymentLinkUrl = link.shortUrl;
+          paymentStatus = "AWAITING_PAYMENT";
+          requestStatus = "AWAITING_APPROVAL";
+          reasonCode = "MANDATE_NOT_CHARGEABLE";
+          reasonText = `${error.message} A hosted payment link was issued instead; no autonomous debit was attempted.`;
+          await prisma.approval.create({
+            data: {
+              requestId,
+              status: "PENDING",
+              amountPaise: evaluation.amountPaise,
+              paymentLinkId: link.linkId,
+              paymentLinkUrl: link.shortUrl,
+            },
+          });
+          await prisma.paymentAttempt.create({
+            data: {
+              requestId,
+              mode: "PAYMENT_LINK",
+              status: "CREATED",
+              amountPaise: evaluation.amountPaise,
+              orderId,
+              paymentLinkUrl: link.shortUrl,
+              errorText: error.message,
+              idempotencyKey: key,
+            },
+          });
+          await appendAuditEvent(
+            "PAYMENT_ATTEMPT_RECORDED",
+            {
+              state: "MANDATE_NOT_CHARGEABLE",
+              orderId,
+              amountPaise: evaluation.amountPaise,
+              error: error.message,
+              fallbackPaymentLinkUrl: link.shortUrl,
+              quarantined: false,
+            },
             requestId,
-            mode: "MANDATE_AUTO_DEBIT",
-            status: "DEBIT_IN_PROGRESS",
-            amountPaise: evaluation.amountPaise,
-            orderId,
-            errorText: (error as Error).message,
-            idempotencyKey: key,
-          },
-        });
-        await appendAuditEvent(
-          "PAYMENT_ATTEMPT_RECORDED",
-          {
-            state: "DEBIT_IN_PROGRESS",
-            orderId,
-            amountPaise: evaluation.amountPaise,
-            error: (error as Error).message,
-            quarantined: true,
-          },
-          requestId,
-        );
+          );
+        } else {
+          // R-03 — ambiguous gateway status quarantines the request instead of
+          // reporting a failure the agent would try to "fix" with a retry.
+          const timedOut = error instanceof GatewayTimeoutError;
+          paymentStatus = "DEBIT_IN_PROGRESS";
+          requestStatus = "DEBIT_IN_PROGRESS";
+          reasonCode = "QUARANTINED_PENDING_RECONCILIATION";
+          reasonText = timedOut
+            ? "The gateway did not confirm this debit before timing out. The request is quarantined; duplicate debits for this cart are blocked until reconciliation completes."
+            : `Gateway error during debit: ${(error as Error).message}. Request quarantined.`;
+          await prisma.paymentAttempt.create({
+            data: {
+              requestId,
+              mode: "MANDATE_AUTO_DEBIT",
+              status: "DEBIT_IN_PROGRESS",
+              amountPaise: evaluation.amountPaise,
+              orderId,
+              errorText: (error as Error).message,
+              idempotencyKey: key,
+            },
+          });
+          await appendAuditEvent(
+            "PAYMENT_ATTEMPT_RECORDED",
+            {
+              state: "DEBIT_IN_PROGRESS",
+              orderId,
+              amountPaise: evaluation.amountPaise,
+              error: (error as Error).message,
+              quarantined: true,
+            },
+            requestId,
+          );
+        }
       }
     }
   } else if (evaluation.decision === "REVIEW") {
