@@ -24,7 +24,11 @@ export type AuditEventType =
   | "RETRY_DEDUPLICATED"
   | "POLICY_UPDATED"
   | "SPEND_RESET"
-  | "TAMPER_DETECTED";
+  | "TAMPER_DETECTED"
+  | "SESSION_CREATED"
+  | "SESSION_VALIDATED"
+  | "SESSION_SECURITY_ALERT"
+  | "SESSION_REVOKED";
 
 export function computeEventHash(input: {
   previousHash: string;

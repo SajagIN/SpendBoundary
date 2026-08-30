@@ -11,6 +11,11 @@ import {
 } from "./policy";
 import { GatewayTimeoutError, razorpayGateway, gatewayMode } from "./razorpay";
 import { getOrCreateMandateSetupLink, getMandateRecord, toMandateView } from "./mandate";
+import {
+  type RequestContext,
+  getSessionBinding,
+  validateSessionContext,
+} from "./session";
 
 export const DEFAULT_AGENT_ID = "agent_demo_console";
 
@@ -27,6 +32,9 @@ export type CheckoutInput = {
   items: CheckoutItemInput[];
   /** Test hook for AC-05: forces an ambiguous gateway status on debit. */
   simulateTimeout?: boolean;
+  /** S-09: Authenticated session context */
+  sessionContext?: RequestContext;
+  sessionId?: string;
 };
 
 export type PaymentStatus =
@@ -41,6 +49,8 @@ export type PaymentStatus =
 export type CheckoutResult = {
   requestId: string;
   agentId: string;
+  sessionId?: string;
+  sessionHash?: string;
   decision: "ALLOW" | "REVIEW" | "DENY";
   reasonCode: string;
   reasonText: string;
@@ -264,11 +274,154 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
     policy.velocityLockoutSec,
   );
 
+  // S-09 — Session Binding & Context Validation
+  const sessionId = input.sessionId?.trim() || input.sessionContext?.sessionId?.trim();
+  let sessionHash: string | undefined;
+
+  if (sessionId) {
+    const session = await getSessionBinding(sessionId);
+    if (!session) {
+      const requestId = newRequestId();
+      await prisma.agentRequest.create({
+        data: {
+          id: requestId,
+          agentId,
+          sessionId,
+          reason: input.reason?.slice(0, 500) ?? "",
+          cartJson: JSON.stringify(input.items ?? []),
+          itemsJson: JSON.stringify(cart.verified),
+          subtotalPaise: cart.subtotalPaise,
+          idempotencyKey: key,
+          status: "REJECTED",
+          requestedAt,
+          evaluatedAt: new Date(),
+          epochTimestamp: BigInt(epochTimestamp),
+          latencyMs: Date.now() - epochTimestamp,
+        },
+      });
+      await appendAuditEvent(
+        "SESSION_SECURITY_ALERT",
+        {
+          sessionId,
+          agentId,
+          reasonCode: "SESSION_NOT_FOUND",
+          reasonText: `Session '${sessionId}' was not found in the gateway directory.`,
+        },
+        requestId,
+      );
+      return {
+        requestId,
+        agentId,
+        sessionId,
+        decision: "DENY",
+        reasonCode: "SESSION_NOT_FOUND",
+        reasonText: `Session '${sessionId}' was not found in the gateway directory.`,
+        paymentStatus: "BLOCKED",
+        amountPaise: cart.subtotalPaise,
+        amountFormatted: formatPaise(cart.subtotalPaise),
+        items: cart.verified,
+        rejectedItems: cart.rejectedItems,
+        rules: [
+          {
+            id: "S-09",
+            label: "Session Binding & Context Security",
+            passed: false,
+            detail: `Session '${sessionId}' was not found in database.`,
+          },
+        ],
+        mandate: toMandateView(await getMandateRecord()),
+        telemetry: {
+          requestedAt: requestedAt.toISOString(),
+          evaluatedAt: new Date().toISOString(),
+          latencyMs: Date.now() - epochTimestamp,
+          epochTimestamp,
+        },
+        idempotencyKey: key,
+        gatewayMode: gatewayMode(),
+        agentGuidance: "Session invalid or missing. Re-authenticate to establish a valid session binding.",
+      };
+    }
+
+    if (input.sessionContext) {
+      const validation = await validateSessionContext(input.sessionContext, session, cart.subtotalPaise);
+      if (!validation.valid) {
+        const requestId = newRequestId();
+        await prisma.agentRequest.create({
+          data: {
+            id: requestId,
+            agentId,
+            sessionId,
+            reason: input.reason?.slice(0, 500) ?? "",
+            cartJson: JSON.stringify(input.items ?? []),
+            itemsJson: JSON.stringify(cart.verified),
+            subtotalPaise: cart.subtotalPaise,
+            idempotencyKey: key,
+            status: "REJECTED",
+            requestedAt,
+            evaluatedAt: new Date(),
+            epochTimestamp: BigInt(epochTimestamp),
+            latencyMs: Date.now() - epochTimestamp,
+          },
+        });
+        await appendAuditEvent(
+          "SESSION_SECURITY_ALERT",
+          {
+            sessionId,
+            agentId,
+            reasonCode: validation.reasonCode,
+            reasonText: validation.reasonText,
+            receivedContext: input.sessionContext,
+          },
+          requestId,
+        );
+        return {
+          requestId,
+          agentId,
+          sessionId,
+          decision: "DENY",
+          reasonCode: validation.reasonCode ?? "SESSION_USER_AGENT_MISMATCH",
+          reasonText: validation.reasonText ?? "Session context validation failed.",
+          paymentStatus: "BLOCKED",
+          amountPaise: cart.subtotalPaise,
+          amountFormatted: formatPaise(cart.subtotalPaise),
+          items: cart.verified,
+          rejectedItems: cart.rejectedItems,
+          rules: [
+            {
+              id: "S-09",
+              label: "Session Binding & Context Security",
+              passed: false,
+              detail: validation.reasonText ?? "Session context validation failed.",
+            },
+          ],
+          mandate: toMandateView(await getMandateRecord()),
+          telemetry: {
+            requestedAt: requestedAt.toISOString(),
+            evaluatedAt: new Date().toISOString(),
+            latencyMs: Date.now() - epochTimestamp,
+            epochTimestamp,
+          },
+          idempotencyKey: key,
+          gatewayMode: gatewayMode(),
+          agentGuidance: "Session context verification failed. Transaction blocked to prevent session hijacking.",
+        };
+      }
+      sessionHash = validation.sessionHash;
+      await appendAuditEvent("SESSION_VALIDATED", {
+        sessionId,
+        agentId,
+        sessionHash,
+      });
+    }
+  }
+
   const requestId = newRequestId();
   await prisma.agentRequest.create({
     data: {
       id: requestId,
       agentId,
+      sessionId: sessionId ?? null,
+      sessionHash: sessionHash ?? null,
       reason: input.reason?.slice(0, 500) ?? "",
       cartJson: JSON.stringify(input.items ?? []),
       itemsJson: JSON.stringify(cart.verified),
@@ -283,6 +436,8 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
     "AGENT_REQUEST",
     {
       agentId,
+      sessionId: sessionId ?? null,
+      sessionHash: sessionHash ?? null,
       reason: input.reason,
       claimedCart: input.items ?? [],
       serverVerifiedItems: cart.verified,
@@ -480,6 +635,8 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
   const result: CheckoutResult = {
     requestId,
     agentId,
+    sessionId: sessionId ?? undefined,
+    sessionHash: sessionHash ?? undefined,
     decision: evaluation.decision,
     reasonCode,
     reasonText,
