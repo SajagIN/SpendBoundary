@@ -282,22 +282,24 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
     const session = await getSessionBinding(sessionId);
     if (!session) {
       const requestId = newRequestId();
-      await prisma.agentRequest.create({
-        data: {
-          id: requestId,
-          agentId,
-          sessionId,
-          reason: input.reason?.slice(0, 500) ?? "",
-          cartJson: JSON.stringify(input.items ?? []),
-          itemsJson: JSON.stringify(cart.verified),
-          subtotalPaise: cart.subtotalPaise,
-          idempotencyKey: key,
-          status: "REJECTED",
-          requestedAt,
-          evaluatedAt: new Date(),
-          epochTimestamp: BigInt(epochTimestamp),
-          latencyMs: Date.now() - epochTimestamp,
-        },
+      const createData: Record<string, unknown> = {
+        id: requestId,
+        agentId,
+        reason: input.reason?.slice(0, 500) ?? "",
+        cartJson: JSON.stringify(input.items ?? []),
+        itemsJson: JSON.stringify(cart.verified),
+        subtotalPaise: cart.subtotalPaise,
+        idempotencyKey: key,
+        status: "REJECTED",
+        requestedAt,
+        evaluatedAt: new Date(),
+        epochTimestamp: BigInt(epochTimestamp),
+        latencyMs: Date.now() - epochTimestamp,
+      };
+      if (sessionId) createData.sessionId = sessionId;
+
+      await (prisma.agentRequest.create as any)({
+        data: createData,
       });
       await appendAuditEvent(
         "SESSION_SECURITY_ALERT",
@@ -346,22 +348,24 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
       const validation = await validateSessionContext(input.sessionContext, session, cart.subtotalPaise);
       if (!validation.valid) {
         const requestId = newRequestId();
-        await prisma.agentRequest.create({
-          data: {
-            id: requestId,
-            agentId,
-            sessionId,
-            reason: input.reason?.slice(0, 500) ?? "",
-            cartJson: JSON.stringify(input.items ?? []),
-            itemsJson: JSON.stringify(cart.verified),
-            subtotalPaise: cart.subtotalPaise,
-            idempotencyKey: key,
-            status: "REJECTED",
-            requestedAt,
-            evaluatedAt: new Date(),
-            epochTimestamp: BigInt(epochTimestamp),
-            latencyMs: Date.now() - epochTimestamp,
-          },
+        const createData: Record<string, unknown> = {
+          id: requestId,
+          agentId,
+          reason: input.reason?.slice(0, 500) ?? "",
+          cartJson: JSON.stringify(input.items ?? []),
+          itemsJson: JSON.stringify(cart.verified),
+          subtotalPaise: cart.subtotalPaise,
+          idempotencyKey: key,
+          status: "REJECTED",
+          requestedAt,
+          evaluatedAt: new Date(),
+          epochTimestamp: BigInt(epochTimestamp),
+          latencyMs: Date.now() - epochTimestamp,
+        };
+        if (sessionId) createData.sessionId = sessionId;
+
+        await (prisma.agentRequest.create as any)({
+          data: createData,
         });
         await appendAuditEvent(
           "SESSION_SECURITY_ALERT",
@@ -416,28 +420,30 @@ export async function requestCheckout(input: CheckoutInput): Promise<CheckoutRes
   }
 
   const requestId = newRequestId();
-  await prisma.agentRequest.create({
-    data: {
-      id: requestId,
-      agentId,
-      sessionId: sessionId ?? null,
-      sessionHash: sessionHash ?? null,
-      reason: input.reason?.slice(0, 500) ?? "",
-      cartJson: JSON.stringify(input.items ?? []),
-      itemsJson: JSON.stringify(cart.verified),
-      subtotalPaise: cart.subtotalPaise,
-      idempotencyKey: key,
-      status: "EVALUATING",
-      requestedAt,
-      epochTimestamp: BigInt(epochTimestamp),
-    },
+  const requestData: Record<string, unknown> = {
+    id: requestId,
+    agentId,
+    reason: input.reason?.slice(0, 500) ?? "",
+    cartJson: JSON.stringify(input.items ?? []),
+    itemsJson: JSON.stringify(cart.verified),
+    subtotalPaise: cart.subtotalPaise,
+    idempotencyKey: key,
+    status: "EVALUATING",
+    requestedAt,
+    epochTimestamp: BigInt(epochTimestamp),
+  };
+  if (sessionId) requestData.sessionId = sessionId;
+  if (sessionHash) requestData.sessionHash = sessionHash;
+
+  await (prisma.agentRequest.create as any)({
+    data: requestData,
   });
   await appendAuditEvent(
     "AGENT_REQUEST",
     {
       agentId,
-      sessionId: sessionId ?? null,
-      sessionHash: sessionHash ?? null,
+      ...(sessionId ? { sessionId } : {}),
+      ...(sessionHash ? { sessionHash } : {}),
       reason: input.reason,
       claimedCart: input.items ?? [],
       serverVerifiedItems: cart.verified,
